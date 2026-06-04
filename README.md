@@ -8,11 +8,23 @@ TypeScript · pi Extension API
 
 Requires `FEATHERLESS_API_KEY` set in the environment.
 
+### Install from remote
+
 ```bash
-FEATHERLESS_API_KEY=your-key pi -e ~/.pi/agent/extensions/featherless
+pi install git:github.com/Mearman/pi-extension-featherless
 ```
 
-Or add the extension to `settings.json` packages array and set the env var there.
+### Try without installing
+
+```bash
+pi -e git:github.com/Mearman/pi-extension-featherless
+```
+
+### Run from a local clone
+
+```bash
+pi -e /path/to/pi-extension-featherless
+```
 
 No dependencies to install — the extension runs directly from `index.ts` via pi's extension loader.
 
