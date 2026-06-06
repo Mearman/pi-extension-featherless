@@ -30,53 +30,77 @@ interface FeatherlessModel {
   owned_by: string;
 }
 
-export default async function (pi: ExtensionAPI) {
-  // Fetch the model list at load time. Network failures here must not block
-  // pi startup — they would surface as a "Failed to load extension" warning
-  // for a transient DNS/TLS hiccup that has nothing to do with the user's
-  // session. On failure we log a warning and skip provider registration;
-  // the user can `/reload` once their network is healthy to retry.
-  let payload: { data: FeatherlessModel[] } | undefined;
-  try {
-    const response = await fetch(MODELS_ENDPOINT, {
-      headers: { "User-Agent": USER_AGENT },
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      throw new Error(
-        `Featherless models fetch failed: ${response.status} ${response.statusText}`,
-      );
-    }
-    payload = (await response.json()) as { data: FeatherlessModel[] };
-  } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    console.warn(
-      `[featherless] could not load model list: ${detail}. ` +
-        `Provider will be unavailable this session; run /reload to retry.`,
+// Module-level so a flurry of session_start events (startup + /reload) only
+// triggers one in-flight fetch. Reset to undefined on completion.
+let pendingRefresh: Promise<void> | undefined;
+
+async function doRefresh(pi: ExtensionAPI): Promise<void> {
+  const response = await fetch(MODELS_ENDPOINT, {
+    headers: { "User-Agent": USER_AGENT },
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `Featherless models fetch failed: ${response.status} ${response.statusText}`,
     );
   }
+  const payload = (await response.json()) as { data: FeatherlessModel[] };
+  pi.registerProvider("featherless", {
+    name: "Featherless.ai",
+    baseUrl: BASE_URL,
+    apiKey: "$FEATHERLESS_API_KEY",
+    api: "openai-completions",
+    compat: {
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+    },
+    models: payload.data.map((model) => ({
+      id: model.id,
+      name: model.id,
+      reasoning: false,
+      input: ["text"] as const,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: model.context_length ?? 32768,
+      maxTokens: model.max_completion_tokens ?? 4096,
+    })),
+  });
+}
 
-  if (payload) {
-    pi.registerProvider("featherless", {
-      name: "Featherless.ai",
-      baseUrl: BASE_URL,
-      apiKey: "$FEATHERLESS_API_KEY",
-      api: "openai-completions",
-      compat: {
-        supportsDeveloperRole: false,
-        supportsReasoningEffort: false,
-      },
-      models: payload.data.map((model) => ({
-        id: model.id,
-        name: model.id,
-        reasoning: false,
-        input: ["text"] as const,
-        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: model.context_length ?? 32768,
-        maxTokens: model.max_completion_tokens ?? 4096,
-      })),
-    });
+function refreshFeatherlessModels(pi: ExtensionAPI): Promise<void> {
+  if (!pendingRefresh) {
+    pendingRefresh = doRefresh(pi)
+      .catch((err) => {
+        const detail = err instanceof Error ? err.message : String(err);
+        // Stale-extension errors fire when the user /reload'd mid-fetch; the
+        // new extension instance will pick up the next refresh. Skip the
+        // warning so the user doesn't see noise for an expected race.
+        if (detail.toLowerCase().includes("stale")) return;
+        console.warn(
+          `[featherless] could not refresh model list: ${detail}. ` +
+            `Run /reload to retry.`,
+        );
+      })
+      .finally(() => {
+        pendingRefresh = undefined;
+      });
   }
+  return pendingRefresh;
+}
+
+export default function (pi: ExtensionAPI) {
+  // Kick off the initial fetch in the background. The factory must not
+  // await it: pi blocks on the factory, and a slow / unreachable
+  // api.featherless.ai would delay the whole TUI from coming up.
+  void refreshFeatherlessModels(pi);
+
+  // Refresh on every session boundary (startup, /new, /resume, /fork,
+  // /reload) so the model list stays in sync with the API across long
+  // sessions. refreshFeatherlessModels dedupes against the in-flight
+  // fetch above, so this is a no-op when the startup fetch is still
+  // running and a real refresh once it has completed.
+  pi.on("session_start", () => {
+    void refreshFeatherlessModels(pi);
+  });
 
   // Normalise Featherless context overflow errors so pi recognises them.
   // Featherless returns: "400 Maximum context length ... exceeds the maximum
