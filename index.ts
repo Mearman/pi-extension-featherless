@@ -14,6 +14,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const BASE_URL = "https://api.featherless.ai/v1";
 const MODELS_ENDPOINT = `${BASE_URL}/models`;
+const USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
+const FETCH_TIMEOUT_MS = 10_000;
 
 interface FeatherlessModel {
   id: string;
@@ -28,39 +31,52 @@ interface FeatherlessModel {
 }
 
 export default async function (pi: ExtensionAPI) {
-  const response = await fetch(MODELS_ENDPOINT, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
-    },
-  });
-  if (!response.ok) {
-    throw new Error(
-      `Featherless models fetch failed: ${response.status} ${response.statusText}`,
+  // Fetch the model list at load time. Network failures here must not block
+  // pi startup — they would surface as a "Failed to load extension" warning
+  // for a transient DNS/TLS hiccup that has nothing to do with the user's
+  // session. On failure we log a warning and skip provider registration;
+  // the user can `/reload` once their network is healthy to retry.
+  let payload: { data: FeatherlessModel[] } | undefined;
+  try {
+    const response = await fetch(MODELS_ENDPOINT, {
+      headers: { "User-Agent": USER_AGENT },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      throw new Error(
+        `Featherless models fetch failed: ${response.status} ${response.statusText}`,
+      );
+    }
+    payload = (await response.json()) as { data: FeatherlessModel[] };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[featherless] could not load model list: ${detail}. ` +
+        `Provider will be unavailable this session; run /reload to retry.`,
     );
   }
 
-  const payload = (await response.json()) as { data: FeatherlessModel[] };
-
-  pi.registerProvider("featherless", {
-    name: "Featherless.ai",
-    baseUrl: BASE_URL,
-    apiKey: "$FEATHERLESS_API_KEY",
-    api: "openai-completions",
-    compat: {
-      supportsDeveloperRole: false,
-      supportsReasoningEffort: false,
-    },
-    models: payload.data.map((model) => ({
-      id: model.id,
-      name: model.id,
-      reasoning: false,
-      input: ["text"] as const,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: model.context_length ?? 32768,
-      maxTokens: model.max_completion_tokens ?? 4096,
-    })),
-  });
+  if (payload) {
+    pi.registerProvider("featherless", {
+      name: "Featherless.ai",
+      baseUrl: BASE_URL,
+      apiKey: "$FEATHERLESS_API_KEY",
+      api: "openai-completions",
+      compat: {
+        supportsDeveloperRole: false,
+        supportsReasoningEffort: false,
+      },
+      models: payload.data.map((model) => ({
+        id: model.id,
+        name: model.id,
+        reasoning: false,
+        input: ["text"] as const,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: model.context_length ?? 32768,
+        maxTokens: model.max_completion_tokens ?? 4096,
+      })),
+    });
+  }
 
   // Normalise Featherless context overflow errors so pi recognises them.
   // Featherless returns: "400 Maximum context length ... exceeds the maximum
