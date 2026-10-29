@@ -1,5 +1,7 @@
 # pi-extension-featherless
 
+[![GitHub](https://img.shields.io/badge/GitHub-181717?logo=github&logoColor=white)](https://github.com/Mearman/pi-extension-featherless)
+
 > Pi extension that dynamically fetches all available models from Featherless.ai and registers them as an OpenAI-compatible provider.
 
 TypeScript · pi Extension API
